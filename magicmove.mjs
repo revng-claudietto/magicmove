@@ -29,10 +29,10 @@ const program = new Command()
   .option('--theme <id>',            'shiki theme id',                           'dracula')
   .option('--duration <ms>',         'per-transition duration',                  '5575')
   .option('--stagger <ms>',          'per-token stagger offset',                 '30')
-  .option('--hold <ms>',             'pauses (both ends + between transitions)', '1500')
-  .option('--hold-start <ms>',       'override --hold for the initial pause (output ms)')
-  .option('--hold-end <ms>',         'override --hold for the final pause (output ms)')
-  .option('--hold-middle <ms>',      'pause at the bounce turnaround (output ms)', '0')
+  .option('--hold <ms>',             'pause between transitions (pre-speed ms)', '1500')
+  .option('--hold-start <ms>',       'pause on the first frame (output ms)',     '1500')
+  .option('--hold-middle <ms>',      'pause at the bounce turnaround (output ms)', '4000')
+  .option('--hold-end <ms>',         'pause on the last frame (output ms)',      '0')
   .option('--no-bounce',             'disable the default forward+back walk')
   .option('--margin <px>',           'CSS margin around the code',               '32')
   .option('--font-size <px>',        'CSS font size',                            '20')
@@ -41,8 +41,8 @@ const program = new Command()
   .option('--post-fps <n>',          'final framerate after itsscale re-encode', '60')
   .option('--crf <n>',               'x264 quality (lower = better)',            '14')
   .option('--scale <n>',             'high-DPI multiplier on CSS sizes',         '3')
-  .option('--slow <n>',              'capture N× slower (more distinct frames)', '8')
-  .option('--speed <n>',             'lossless playback speedup via -itsscale',  '3')
+  .option('--slow <n>',              'capture N× slower (more distinct frames)', '16')
+  .option('--speed <n>',             'lossless playback speedup via -itsscale',  '6')
   .showHelpAfterError()
   .parse();
 
@@ -63,8 +63,8 @@ const snippets = opts.bounce
 const duration  = Number(opts.duration);
 const stagger   = Number(opts.stagger);
 const hold      = Number(opts.hold);
-const holdStart = Number(opts.holdStart ?? opts.hold);
-const holdEnd   = Number(opts.holdEnd   ?? opts.hold);
+const holdStart = Number(opts.holdStart);
+const holdEnd   = Number(opts.holdEnd);
 let   holdMiddle = Number(opts.holdMiddle);
 if (holdMiddle > 0 && !opts.bounce) {
   console.error('--hold-middle needs the bounce walk; ignoring it under --no-bounce.');

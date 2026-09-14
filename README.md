@@ -14,9 +14,10 @@ video, with tokens animating between positions instead of cross-fading.
 nix run github:revng-claudietto/magicmove -- examples/before.c examples/middle.c examples/after.c --output transition.mp4
 ```
 
-Defaults shipped in this repo (Dracula theme, ~10 s, 1494×1494 source @
-60 fps with a 3× `-itsscale` post-process, bounce on, scale 3×) target a
-clip you can post to X without further tweaking. CLI parsing is via
+Defaults shipped in this repo (Dracula theme, ~10 s @ 60 fps, captured
+16× slow with a 6× `-itsscale` post-process, bounce on, scale 3×, a
+1.5 s opening beat and a 4 s pause at the turnaround) target a clip you
+can post to X without further tweaking. CLI parsing is via
 [commander](https://github.com/tj/commander.js); `--help` lists every
 flag.
 
@@ -53,7 +54,7 @@ You'll need `ffmpeg` and a Playwright-compatible Chromium on PATH.
    border around the code box.
 2. **Capture pass.** Vue mounts `<ShikiMagicMove>` with the first
    snippet. Node drives transitions via `window.__setCode(i)`. The
-   animation runs at slow=8× wall speed so we capture more screenshots
+   animation runs at slow=16× wall speed so we capture more screenshots
    per second of output animation than the screenshot loop can manage
    at real time.
 3. **Encode pass.** ffmpeg compresses the timeline back with
@@ -73,21 +74,25 @@ only buys you more distinct frames per second of animation.
 
 `--speed` does, and it scales the whole captured timeline, so
 `--duration`, `--stagger` and `--hold` are all in *pre-`--speed`*
-milliseconds: with `--speed 6`, `--duration 5575` is a 929 ms
+milliseconds: at the default `--speed 6`, `--duration 5575` is a 929 ms
 transition in the finished video.
 
 `--hold-start`, `--hold-middle` and `--hold-end` are the exception.
 They're spliced in after the speed pass, so they're plain final-video
 milliseconds: `--hold-end 6000` is a 6.000 s tail whatever `--slow` and
-`--speed` are. Start and end default to `--hold`, which does get scaled
-— so passing `--hold` alone gives you longer pauses at the ends than in
-the middle.
+`--speed` are. `--hold` doesn't feed them; each has its own default
+(1500 / 4000 / 0).
 
 `--hold-middle` is the pause at the bounce turnaround — the beat on the
-last snippet before the walk back — and defaults to 0, i.e. just the
-regular `--hold`. When set it replaces that hold rather than adding to
-it, so the turnaround pause is exactly what you asked for. It needs the
-bounce walk, so it's ignored under `--no-bounce`.
+last snippet before the walk back, where the interesting version of the
+code is on screen. It replaces the captured `--hold` at that point
+rather than adding to it, so the turnaround pause is exactly what you
+asked for. It needs the bounce walk, so it's ignored under
+`--no-bounce`.
+
+The tail defaults to 0 because the bounce ends on the same frame it
+started: on loop, the closing pause and `--hold-start` run together as
+one. Set `--hold-end` when you want the two ends weighted differently.
 
 None of the three cost anything to record: a 6 s tail captured for real
 would be 96 s of shooting at `--slow 16`.
