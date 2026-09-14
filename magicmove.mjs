@@ -30,8 +30,9 @@ const program = new Command()
   .option('--duration <ms>',         'per-transition duration',                  '5575')
   .option('--stagger <ms>',          'per-token stagger offset',                 '30')
   .option('--hold <ms>',             'pauses (both ends + between transitions)', '1500')
-  .option('--hold-start <ms>',       'override --hold for the initial pause')
-  .option('--hold-end <ms>',         'override --hold for the final pause')
+  .option('--hold-start <ms>',       'override --hold for the initial pause (output ms)')
+  .option('--hold-end <ms>',         'override --hold for the final pause (output ms)')
+  .option('--hold-middle <ms>',      'pause at the bounce turnaround (output ms)', '0')
   .option('--no-bounce',             'disable the default forward+back walk')
   .option('--margin <px>',           'CSS margin around the code',               '32')
   .option('--font-size <px>',        'CSS font size',                            '20')
@@ -64,6 +65,11 @@ const stagger   = Number(opts.stagger);
 const hold      = Number(opts.hold);
 const holdStart = Number(opts.holdStart ?? opts.hold);
 const holdEnd   = Number(opts.holdEnd   ?? opts.hold);
+let   holdMiddle = Number(opts.holdMiddle);
+if (holdMiddle > 0 && !opts.bounce) {
+  console.error('--hold-middle needs the bounce walk; ignoring it under --no-bounce.');
+  holdMiddle = 0;
+}
 const margin    = Number(opts.margin);
 const fontSize  = Number(opts.fontSize);
 const fps       = String(opts.fps);
@@ -75,9 +81,12 @@ const speed     = Math.max(1, Number(opts.speed));
 
 const captureDuration   = duration  * slow;
 const captureStagger    = stagger   * slow;
-const captureHoldStart  = holdStart * slow;
 const captureHoldMid    = hold      * slow;
-const captureHoldEnd    = holdEnd   * slow;
+// holdStart/holdEnd are deliberately absent here: the opening and closing
+// pauses are still frames, so ffmpeg clones them in afterwards (see tpad
+// below) instead of us recording them. That makes them exact final-video
+// milliseconds — unscaled by --slow and, unlike the rest of the timeline,
+// by --speed — and stops a long tail from costing slow× real time to shoot.
 
 // All CSS sizes are multiplied by `scale` so the rendered output is at high DPI
 // without relying on deviceScaleFactor (recordVideo doesn't honor DSF).
@@ -239,13 +248,31 @@ const captureLoop = (async () => {
   }
 })();
 
+// tpad clones the first and last frame, so both have to be settled states.
+// The screenshot loop runs at a few fps, so wait for actual frames to land
+// rather than guessing with a wall-clock timeout.
+const waitForFrames = async (n) => {
+  const target   = frameIdx + n;
+  const deadline = Date.now() + 30000;
+  while (frameIdx < target && Date.now() < deadline) await page.waitForTimeout(50);
+};
+
+// The bounce turnaround: the last of the base snippets, where the walk
+// reverses. Its pause is spliced in later, so all we record here is the
+// frame index to cut at.
+const peakStep  = baseSnippets.length - 1;
+let   peakFrame = null;
+
 const captureStart = Date.now();
-await page.waitForTimeout(captureHoldStart);
+await waitForFrames(2);
 for (let i = 1; i < snippets.length; i++) {
   await page.evaluate((idx) => { window.__setCode(idx); }, i);
   await page.waitForTimeout(captureDuration + 400);
   const isLast = i === snippets.length - 1;
-  await page.waitForTimeout(isLast ? captureHoldEnd : captureHoldMid);
+  const isPeak = holdMiddle > 0 && i === peakStep;
+  if (isLast || isPeak) await waitForFrames(2);
+  if (isPeak) peakFrame = frameIdx;
+  if (!isLast && !isPeak) await page.waitForTimeout(captureHoldMid);
 }
 stopping = true;
 await captureLoop;
@@ -269,16 +296,51 @@ console.error(`captured ${frameIdx} frames in ${captureSpan.toFixed(2)}s (${capt
 const needsPostPass = speed > 1 || postFps !== fps;
 const pass1Path = needsPostPass ? join(workDir, 'pre-final.mp4') : opts.output;
 
+// All three pauses are cloned frames added by the last pass, where the
+// timeline is already the final one — so they're plain output seconds, and
+// neither --slow nor --speed touches them.
+const secs = (ms) => (ms / 1000).toFixed(3);
+const endSpec = [
+  holdStart > 0 && `start_duration=${secs(holdStart)}:start_mode=clone`,
+  holdEnd   > 0 && `stop_duration=${secs(holdEnd)}:stop_mode=clone`,
+].filter(Boolean).join(':');
+
+// Output-frame index of the settled peak, from the frame counter: ffmpeg
+// reads the sequence at a constant capturedFps, so frame n sits at
+// n/capturedFps/slow/speed seconds on the final timeline.
+const peakAt = (outFps, speedup) =>
+  Math.round((peakFrame / capturedFps / slow / speedup) * Number(outFps));
+
+// `head` is the chain that lands on the final timeline; everything after it
+// is padding. With a turnaround pause we have to cut the stream at the peak,
+// clone the settled frame, and concat the walk back onto it.
+const finish = (head, outFps, speedup) => {
+  const tail = [...(endSpec ? [`tpad=${endSpec}`] : []), 'format=yuv420p'];
+  if (!holdMiddle || peakFrame === null) {
+    return ['-vf', [...head, ...tail].join(',')];
+  }
+  const cut = peakAt(outFps, speedup);
+  return ['-filter_complex', [
+    `[0:v]${[...head, 'split=2'].join(',')}[pk][back]`,
+    `[pk]trim=end_frame=${cut},setpts=PTS-STARTPTS,` +
+      `tpad=stop_duration=${secs(holdMiddle)}:stop_mode=clone[pk2]`,
+    `[back]trim=start_frame=${cut},setpts=PTS-STARTPTS[back2]`,
+    `[pk2][back2]concat=n=2:v=1,${tail.join(',')}[v]`,
+  ].join(';'), '-map', '[v]'];
+};
+
 const r = spawnSync('ffmpeg', [
-  '-y', '-loglevel', 'error',
+  '-y', '-nostdin', '-loglevel', 'error',
   '-framerate', capturedFps.toFixed(3),
   '-i', join(framesDir, 'f%06d.png'),
-  '-vf', `setpts=PTS/${slow},fps=${fps},format=yuv420p`,
+  ...(needsPostPass
+    ? ['-vf', `setpts=PTS/${slow},fps=${fps},format=yuv420p`]
+    : finish([`setpts=PTS/${slow}`, `fps=${fps}`], fps, 1)),
   '-c:v', 'libx264', '-preset', 'veryslow', '-crf', crf,
   '-profile:v', 'high', '-level', '4.2', '-tune', 'stillimage',
   '-movflags', '+faststart',
   pass1Path,
-], { stdio: 'inherit' });
+], { stdio: ['ignore', 'inherit', 'inherit'] });
 if (r.status !== 0) {
   console.error('ffmpeg pass 1 failed');
   process.exit(1);
@@ -286,19 +348,20 @@ if (r.status !== 0) {
 
 // Pass 2: optional. Apply -itsscale to compress playback by `speed`, then
 // re-encode at --post-fps. With itsscale the input now plays at fps*speed
-// effective; -r post_fps then resamples to a clean output framerate so
-// ffprobe reports exactly --post-fps regardless of the timeline trickery.
+// effective; the fps filter resamples to a clean output framerate so ffprobe
+// reports exactly --post-fps regardless of the timeline trickery, and pads
+// after that so the pauses come out at whole frames.
 if (needsPostPass) {
   const r2 = spawnSync('ffmpeg', [
-    '-y', '-loglevel', 'error',
+    '-y', '-nostdin', '-loglevel', 'error',
     ...(speed > 1 ? ['-itsscale', (1 / speed).toFixed(6)] : []),
     '-i', pass1Path,
-    '-r', postFps,
+    ...finish([`fps=${postFps}`], postFps, speed),
     '-c:v', 'libx264', '-preset', 'veryslow', '-crf', crf,
     '-profile:v', 'high', '-level', '4.2', '-tune', 'stillimage',
     '-movflags', '+faststart',
     opts.output,
-  ], { stdio: 'inherit' });
+  ], { stdio: ['ignore', 'inherit', 'inherit'] });
   if (r2.status !== 0) {
     console.error('ffmpeg pass 2 failed');
     process.exit(1);
@@ -306,4 +369,7 @@ if (needsPostPass) {
 }
 
 rmSync(workDir, { recursive: true, force: true });
-console.log(`Wrote ${opts.output} (${W}x${H}, source ${fps} fps × ${speed} → ${postFps} fps out, scale=${scale}, slow=${slow}, crf=${crf})`);
+console.log(`Wrote ${opts.output} (${W}x${H}, source ${fps} fps × ${speed} → ${postFps} fps out, scale=${scale}, slow=${slow}, crf=${crf}, pad ${holdStart}/${holdMiddle}/${holdEnd}ms` +
+  (holdMiddle > 0 && peakFrame !== null
+    ? `, turnaround at ${(peakFrame / capturedFps / slow / speed).toFixed(2)}s`
+    : '') + ')');

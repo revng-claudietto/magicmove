@@ -61,6 +61,36 @@ You'll need `ffmpeg` and a Playwright-compatible Chromium on PATH.
    yuv420p CRF 14 with `tune=stillimage`. Optionally `-itsscale 1/speed`
    for a lossless post-process speedup if you want shorter playback
    without re-encoding.
+4. **Pad pass.** The opening and closing pauses are cloned onto the
+   first and last frame with `tpad`, rather than recorded. Capturing
+   them would cost `slow`× their length in real time for footage that
+   never changes.
+
+## Timing units
+
+`--slow` never affects output timing — `setpts` undoes it exactly. It
+only buys you more distinct frames per second of animation.
+
+`--speed` does, and it scales the whole captured timeline, so
+`--duration`, `--stagger` and `--hold` are all in *pre-`--speed`*
+milliseconds: with `--speed 6`, `--duration 5575` is a 929 ms
+transition in the finished video.
+
+`--hold-start`, `--hold-middle` and `--hold-end` are the exception.
+They're spliced in after the speed pass, so they're plain final-video
+milliseconds: `--hold-end 6000` is a 6.000 s tail whatever `--slow` and
+`--speed` are. Start and end default to `--hold`, which does get scaled
+— so passing `--hold` alone gives you longer pauses at the ends than in
+the middle.
+
+`--hold-middle` is the pause at the bounce turnaround — the beat on the
+last snippet before the walk back — and defaults to 0, i.e. just the
+regular `--hold`. When set it replaces that hold rather than adding to
+it, so the turnaround pause is exactly what you asked for. It needs the
+bounce walk, so it's ignored under `--no-bounce`.
+
+None of the three cost anything to record: a 6 s tail captured for real
+would be 96 s of shooting at `--slow 16`.
 
 ## License
 
